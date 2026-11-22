@@ -1,11 +1,10 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="ru">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>ЗАС-Чат ПВО</title>
-<script src="https://unpkg.com"></script>
-<script src="https://cloudflare.com"></script>
+<script src="https://jsdelivr.net"></script>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
   body{background:#121417;color:#e6e6e6;font-family:Consolas,monospace;height:100dvh;display:flex;flex-direction:column}
@@ -36,7 +35,6 @@
     <div id="loginErr" style="color:#ff5555;font-size:12px;text-align:center"></div>
   </div>
 </div>
-
 <div id="chatScreen">
   <div class="top">
     <span id="hdrInfo" style="color:#33aaff;font-weight:bold"></span>
@@ -50,87 +48,59 @@
     <button onclick="send()" style="padding:0 14px">➤</button>
   </div>
 </div>
-
 <script>
 let GRP="", CALL="", CODE="", TOPIC="", client=null, raw=[], seen=new Set();
 const dayStr = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; };
-
-function enterChat() {
-  GRP = document.getElementById('inGroup').value.trim().toUpperCase();
-  CALL = document.getElementById('inCall').value.trim();
-  CODE = document.getElementById('inCode').value.trim();
-  if (!GRP || !CALL || !CODE) { document.getElementById('loginErr').textContent = "Заполните все 3 поля!"; return; }
-  TOPIC = 'pvo_zas_net_' + CryptoJS.SHA256('PVO-CH-' + GRP).toString().slice(0, 24);
-  document.getElementById('loginScreen').style.display = 'none';
-  document.getElementById('chatScreen').style.display = 'flex';
-  document.getElementById('hdrInfo').textContent = `${GRP} | ${CALL}`;
-  startMqtt();
-}
-
-function exitChat() {
-  if (client) { try { client.end(true); } catch(e){} }
-  raw = []; seen.clear();
-  document.getElementById('box').innerHTML = '';
-  document.getElementById('chatScreen').style.display = 'none';
-  document.getElementById('loginScreen').style.display = 'flex';
-}
-
-function startMqtt() {
-  client = mqtt.connect("wss://broker.emqx.io:8084/mqtt", { reconnectPeriod: 2000 });
-  client.on("connect", () => {
-    document.getElementById("netSt").textContent = "🟢 В СЕТИ";
-    document.getElementById("netSt").style.color = "#00ff66";
-    client.subscribe(TOPIC);
-  });
-  client.on("offline", () => {
-    document.getElementById("netSt").textContent = "🔴 ОФЛАЙН";
-    document.getElementById("netSt").style.color = "#ff5555";
-  });
-  client.on("message", (t, payload) => {
-    try {
-      const pkg = JSON.parse(payload.toString());
-      if (pkg.clear) { raw = []; seen.clear(); render(); return; }
-      if (pkg.id && !seen.has(pkg.id)) { seen.add(pkg.id); raw.push(pkg); if (raw.length > 150) raw.shift(); render(); }
-    } catch (e) {}
-  });
-}
-
-async function send() {
-  const tx = document.getElementById('mi').value.trim(), fi = document.getElementById('fi');
-  if (!tx && !fi.files) return;
-  let fd = null;
-  if (fi.files) {
-    const f = fi.files;
-    const b64 = await new Promise(res => { const r = new FileReader(); r.onload = () => res(r.result.split(',')); r.readAsDataURL(f); });
-    fd = { name: f.name, type: f.type || 'application/octet-stream', b64 };
+async function sha256Hex(str) {
+  const buf = new TextEncoder().encode(str);
+  if (window.crypto && crypto.subtle) {
+    const h = await crypto.subtle.digest('SHA-256', buf);
+    return Array.from(new Uint8Array(h)).map(b => b.toString(16).padStart(2,'0')).join('');
   }
-  const obj = { sender: CALL, time: new Date().toTimeString().slice(0, 8), text: tx, file: fd };
-  const ct = CryptoJS.AES.encrypt(JSON.stringify(obj), dayStr() + "::" + CODE).toString();
-  const pkg = { id: Date.now() + "_" + Math.floor(Math.random()*999), v: 2, ct };
-  document.getElementById('mi').value = ''; fi.value = '';
-  client.publish(TOPIC, JSON.stringify(pkg), { qos: 1 });
+  let h1 = 0x811c9dc5, h2 = 0x1b873593;
+  for (let i = 0; i < buf.length; i++) { h1 = Math.imul(h1 ^ buf[i], 0x01000193); h2 = Math.imul(h2 ^ buf[i], 0x85ebca6b); }
+  return ((h1 >>> 0).toString(16).padStart(8,'0') + (h2 >>> 0).toString(16).padStart(8,'0')).repeat(4);
 }
-
-function render() {
+async function streamXor(bytes, keyStr, saltHex) {
+  const out = new Uint8Array(bytes.length); let blk = 0, ks = new Uint8Array(0);
+  for (let i = 0; i < bytes.length; i++) {
+    if (i % 32 === 0) { const hex = await sha256Hex(keyStr + "::" + saltHex + "::" + (blk++)); ks = new Uint8Array(hex.match(/.{2}/g).map(h => parseInt(h, 16))); }
+    out[i] = bytes[i] ^ ks[i % 32];
+  }
+  return out;
+}
+const b2a = u => { let s=''; for(let i=0;i<u.length;i+=8192) s+=String.fromCharCode.apply(null,u.subarray(i,i+8192)); return btoa(s); };
+const a2b = s => { const b=atob(s), u=new Uint8Array(b.length); for(let i=0;i<b.length;i++) u[i]=b.charCodeAt(i); return u; };
+async function enterChat() {
+  GRP = document.getElementById('inGroup').value.trim().toUpperCase(); CALL = document.getElementById('inCall').value.trim(); CODE = document.getElementById('inCode').value.trim();
+  if (!GRP || !CALL || !CODE) { document.getElementById('loginErr').textContent = "Заполните все 3 поля!"; return; }
+  TOPIC = 'pvo_zas_v3_' + (await sha256Hex('PVO-CH-' + GRP)).slice(0, 24);
+  document.getElementById('loginScreen').style.display = 'none'; document.getElementById('chatScreen').style.display = 'flex';
+  document.getElementById('hdrInfo').textContent = `${GRP} | ${CALL}`; startMqtt();
+}
+function exitChat() { if (client) { try { client.end(true); } catch(e){} } raw = []; seen.clear(); document.getElementById('box').innerHTML = ''; document.getElementById('chatScreen').style.display = 'none'; document.getElementById('loginScreen').style.display = 'flex'; }
+function startMqtt() {
+  if (typeof mqtt === 'undefined') { document.getElementById("netSt").textContent = "🔴 Ошибка сети"; return; }
+  client = mqtt.connect("wss://broker.emqx.io:8084/mqtt", { reconnectPeriod: 2000 });
+  client.on("connect", () => { document.getElementById("netSt").textContent = "🟢 В СЕТИ"; document.getElementById("netSt").style.color = "#00ff66"; client.subscribe(TOPIC); });
+  client.on("offline", () => { document.getElementById("netSt").textContent = "🔴 ОФЛАЙН"; document.getElementById("netSt").style.color = "#ff5555"; });
+  client.on("message", async (t, payload) => { try { const pkg = JSON.parse(payload.toString()); if (pkg.clear) { raw = []; seen.clear(); await render(); return; } if (pkg.id && !seen.has(pkg.id)) { seen.add(pkg.id); raw.push(pkg); if (raw.length > 150) raw.shift(); await render(); } } catch (e) {} });
+}
+async function send() {
+  const tx = document.getElementById('mi').value.trim(), fi = document.getElementById('fi'); if (!tx && !fi.files) return;
+  let fd = null; if (fi.files) { const f = fi.files; const b64 = await new Promise(res => { const r = new FileReader(); r.onload = () => res(r.result.split(',')); r.readAsDataURL(f); }); fd = { name: f.name, type: f.type || 'application/octet-stream', b64 }; }
+  const salt = Math.random().toString(16).slice(2, 14), encBytes = await streamXor(new TextEncoder().encode(JSON.stringify({ magic: "PVO_OK", sender: CALL, time: new Date().toTimeString().slice(0, 8), text: tx, file: fd })), dayStr() + "::" + CODE, salt);
+  document.getElementById('mi').value = ''; fi.value = ''; client.publish(TOPIC, JSON.stringify({ id: Date.now() + "_" + Math.floor(Math.random()*999), v: 3, s: salt, ct: b2a(encBytes) }), { qos: 1 });
+}
+async function render() {
   const box = document.getElementById('box'); box.innerHTML = '';
   for (const it of raw) {
-    let dec = null;
-    try {
-      const str = CryptoJS.AES.decrypt(it.ct, dayStr() + "::" + CODE).toString(CryptoJS.enc.Utf8);
-      if (str) dec = JSON.parse(str);
-    } catch (e) {}
-    if (!dec) continue; // Сообщения с неверным кодом суток вообще не отображаются!
-    const d = document.createElement('div');
-    d.className = 'msg' + (dec.sender === CALL ? ' mine' : '');
+    if (it.v !== 3 || !it.s || !it.ct) continue;
+    let dec = null; try { const parsed = JSON.parse(new TextDecoder().decode(await streamXor(a2b(it.ct), dayStr() + "::" + CODE, it.s))); if (parsed && parsed.magic === "PVO_OK") dec = parsed; } catch (e) {}
+    if (!dec) continue;
+    const d = document.createElement('div'); d.className = 'msg' + (dec.sender === CALL ? ' mine' : '');
     d.innerHTML = `<div class="meta"><b style="color:#33aaff">${dec.sender}</b><span>${dec.time}</span></div>` + (dec.text ? `<div style="white-space:pre-wrap">${dec.text.replace(/</g,'&lt;')}</div>` : '');
-    if (dec.file && dec.file.b64) {
-      const fb = document.createElement('div'); fb.className = 'fbox';
-      const bin = atob(dec.file.b64), arr = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
-      const a = document.createElement('a'); a.className = 'fbtn'; a.textContent = 'Скачать'; a.download = dec.file.name;
-      a.href = URL.createObjectURL(new Blob([arr], { type: dec.file.type }));
-      fb.innerHTML = `<span>📦 ${dec.file.name}</span>`; fb.appendChild(a); d.appendChild(fb);
-    }
+    if (dec.file && dec.file.b64) { const fb = document.createElement('div'); fb.className = 'fbox'; const bin = atob(dec.file.b64), arr = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i); const a = document.createElement('a'); a.className = 'fbtn'; a.textContent = 'Скачать'; a.download = dec.file.name; a.href = URL.createObjectURL(new Blob([arr], { type: dec.file.type })); fb.innerHTML = `<span>📦 ${dec.file.name}</span>`; fb.appendChild(a); d.appendChild(fb); }
     box.appendChild(d);
   }
   box.scrollTop = box.scrollHeight;

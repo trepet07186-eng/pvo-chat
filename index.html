@@ -26,7 +26,7 @@
 <body>
 <div id="loginScreen">
   <div class="card">
-    <div style="color:#00ff66;font-weight:bold;font-size:16px;text-align:center">🛡 КАНАЛ СВЯЗИ ПВО</div>
+    <div style="color:#00ff66;font-weight:bold;font-size:16px;text-align:center">🛡 КАНАЛ СВЯЗИ ПВО (v7)</div>
     <input id="inGroup" placeholder="Группа (например: ПФО-01)">
     <input id="inCall" placeholder="Позывной (например: МОГ-1)">
     <input id="inCode" placeholder="Код суток (с экрана КП)">
@@ -94,7 +94,7 @@ function startWs() {
   ws.onopen = () => { ws.send(pktConnect("pvo_" + Math.random().toString(16).slice(2, 10))); };
   ws.onmessage = async (ev) => {
     const u = new Uint8Array(ev.data); if (!u.length) return;
-    const t = u & 0xF0;
+    const t = u.at(0) & 0xF0;
     if (t === 0x20) {
       document.getElementById("netSt").textContent = "🟢 В СЕТИ"; document.getElementById("netSt").style.color = "#00ff66";
       ws.send(pktSub(TOPIC));
@@ -103,7 +103,7 @@ function startWs() {
       let idx = 1, mult = 1, b = 0;
       do { b = u[idx++]; mult *= 128; } while ((b & 128) !== 0);
       const tlen = (u[idx] << 8) | u[idx + 1]; idx += 2 + tlen;
-      if (u & 0x06) idx += 2;
+      if (u.at(0) & 0x06) idx += 2;
       try {
         const pkg = JSON.parse(new TextDecoder().decode(u.subarray(idx)));
         if (pkg.clear) { raw = []; seen.clear(); await render(); return; }
@@ -117,7 +117,7 @@ async function send() {
   const tx = document.getElementById('mi').value.trim(), fi = document.getElementById('fi');
   if ((!tx && !fi.files) || !ws || ws.readyState !== 1) return;
   let fd = null;
-  if (fi.files) { const f = fi.files; const b64 = await new Promise(res => { const r = new FileReader(); r.onload = () => res(r.result.split(',')); r.readAsDataURL(f); }); fd = { name: f.name, type: f.type || 'application/octet-stream', b64 }; }
+  if (fi.files && fi.files.length > 0) { const f = fi.files.item(0); const b64 = await new Promise(res => { const r = new FileReader(); r.onload = () => res(r.result.split(',').at(1)); r.readAsDataURL(f); }); fd = { name: f.name, type: f.type || 'application/octet-stream', b64 }; }
   const salt = Math.random().toString(16).slice(2, 14), encBytes = await streamXor(new TextEncoder().encode(JSON.stringify({ magic: "PVO_OK", sender: CALL, time: new Date().toTimeString().slice(0, 8), text: tx, file: fd })), dayStr() + "::" + CODE, salt);
   document.getElementById('mi').value = ''; fi.value = '';
   ws.send(pktPub(TOPIC, JSON.stringify({ id: Date.now() + "_" + Math.floor(Math.random()*999), v: 3, s: salt, ct: b2a(encBytes) })));

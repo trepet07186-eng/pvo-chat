@@ -26,7 +26,7 @@
 <body>
 <div id="loginScreen">
   <div class="card">
-    <div style="color:#00ff66;font-weight:bold;font-size:16px;text-align:center">🛡 КАНАЛ СВЯЗИ ПВО (v10)</div>
+    <div style="color:#00ff66;font-weight:bold;font-size:16px;text-align:center">🛡 КАНАЛ СВЯЗИ ПВО (v15)</div>
     <input id="inGroup" placeholder="Группа (например: ПФО-01)">
     <input id="inCall" placeholder="Позывной (например: МОГ-1)">
     <input id="inCode" placeholder="Код суток (с экрана КП)">
@@ -76,7 +76,7 @@ async function enterChat() {
   CALL = document.getElementById('inCall').value.trim();
   CODE = document.getElementById('inCode').value.trim();
   if (!GRP || !CALL || !CODE) { document.getElementById('loginErr').textContent = "Заполните все 3 поля!"; return; }
-  TOPIC = 'pvo_zas_v10_' + (await sha256Hex('PVO-CH-' + GRP)).slice(0, 24);
+  TOPIC = 'pvo_zas_v15_' + (await sha256Hex('PVO-CH-' + GRP)).slice(0, 24);
   document.getElementById('loginScreen').style.display = 'none';
   document.getElementById('chatScreen').style.display = 'flex';
   document.getElementById('hdrInfo').textContent = `${GRP} [#${TOPIC.slice(-4)}] | ${CALL}`;
@@ -91,22 +91,22 @@ function exitChat() {
 }
 async function pollMessages() {
   try {
-    const resp = await fetch(RELAY + TOPIC + "/json?poll=1&since=12h");
+    const resp = await fetch(RELAY + TOPIC + "/raw?poll=1&since=12h", { cache: "no-store" });
     if (!resp.ok) throw new Error("HTTP " + resp.status);
     const txt = await resp.text();
     document.getElementById("netSt").textContent = "🟢 В СЕТИ"; document.getElementById("netSt").style.color = "#00ff66";
     let added = false;
     for (const line of txt.split("\n")) {
       if (!line.trim()) continue;
-      const ev = JSON.parse(line);
-      if (ev.event !== "message" || !ev.message) continue;
-      const pkg = JSON.parse(ev.message);
-      if (pkg.clear) { raw = []; seen.clear(); added = true; }
-      else if (pkg.id && !seen.has(pkg.id)) { seen.add(pkg.id); raw.push(pkg); if (raw.length > 150) raw.shift(); added = true; }
+      try {
+        const pkg = JSON.parse(line);
+        if (pkg.clear) { raw = []; seen.clear(); added = true; }
+        else if (pkg.id && !seen.has(pkg.id)) { seen.add(pkg.id); raw.push(pkg); if (raw.length > 120) raw.shift(); added = true; }
+      } catch (e) {}
     }
     if (added) await render();
   } catch (e) {
-    document.getElementById("netSt").textContent = "🔴 Нет связи"; document.getElementById("netSt").style.color = "#ff5555";
+    document.getElementById("netSt").textContent = "🔴 " + (e.message || "Нет сети"); document.getElementById("netSt").style.color = "#ff5555";
   }
 }
 async function send() {
@@ -120,15 +120,18 @@ async function send() {
   }
   const salt = Math.random().toString(16).slice(2, 14);
   const encBytes = await streamXor(new TextEncoder().encode(JSON.stringify({ magic: "PVO_OK", sender: CALL, time: new Date().toTimeString().slice(0, 8), text: tx, file: fd })), dayStr() + "::" + CODE, salt);
-  const pkg = { id: Date.now() + "_" + Math.floor(Math.random()*999), v: 10, s: salt, ct: b2a(encBytes) };
+  const pkg = { id: Date.now() + "_" + Math.floor(Math.random()*999), v: 15, s: salt, ct: b2a(encBytes) };
   document.getElementById('mi').value = ''; fi.value = '';
-  await fetch(RELAY + TOPIC, { method: "POST", body: JSON.stringify(pkg) });
-  await pollMessages();
+  try {
+    await fetch(RELAY + TOPIC, { method: "POST", mode: "no-cors", body: JSON.stringify(pkg) });
+    if (!seen.has(pkg.id)) { seen.add(pkg.id); raw.push(pkg); await render(); }
+    setTimeout(pollMessages, 800);
+  } catch (e) { alert("Ошибка отправки: " + e); }
 }
 async function render() {
   const box = document.getElementById('box'); box.innerHTML = '';
   for (const it of raw) {
-    if (it.v !== 10 || !it.s || !it.ct) continue;
+    if (it.v !== 15 || !it.s || !it.ct) continue;
     let dec = null; try { const parsed = JSON.parse(new TextDecoder().decode(await streamXor(a2b(it.ct), dayStr() + "::" + CODE, it.s))); if (parsed && parsed.magic === "PVO_OK") dec = parsed; } catch (e) {}
     if (!dec) continue;
     const d = document.createElement('div'); d.className = 'msg' + (dec.sender === CALL ? ' mine' : '');

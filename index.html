@@ -26,7 +26,7 @@
 <body>
 <div id="loginScreen">
   <div class="card">
-    <div style="color:#00ff66;font-weight:bold;font-size:16px;text-align:center">🛡 КАНАЛ СВЯЗИ ПВО (v8)</div>
+    <div style="color:#00ff66;font-weight:bold;font-size:16px;text-align:center">🛡 КАНАЛ СВЯЗИ ПВО (v9)</div>
     <input id="inGroup" placeholder="Группа (например: ПФО-01)">
     <input id="inCall" placeholder="Позывной (например: МОГ-1)">
     <input id="inCode" placeholder="Код суток (с экрана КП)">
@@ -72,7 +72,11 @@ const b2a = u => { let s=''; for(let i=0;i<u.length;i+=8192) s+=String.fromCharC
 const a2b = s => { const b=atob(s), u=new Uint8Array(b.length); for(let i=0;i<b.length;i++) u[i]=b.charCodeAt(i); return u; };
 function encLen(n) { const r=[]; do { let d=n%128; n=Math.floor(n/128); if(n>0) d|=128; r.push(d); } while(n>0); return r; }
 function strBytes(s) { const b=new TextEncoder().encode(s); return [b.length>>8, b.length&255, ...b]; }
-function pktConnect(cid) { const vh=new Array(0,4,77,81,84,84,4,2,0,60), pl=strBytes(cid); return new Uint8Array([0x10, ...encLen(vh.length+pl.length), ...vh, ...pl]); }
+function pktConnect(cid) {
+  const vh = Array.from("00044d5154540402003c".match(/../g), h => parseInt(h, 16));
+  const pl = strBytes(cid);
+  return new Uint8Array([0x10, ...encLen(vh.length + pl.length), ...vh, ...pl]);
+}
 function pktSub(topic) { const pl=[0,1, ...strBytes(topic), 0]; return new Uint8Array([0x82, ...encLen(pl.length), ...pl]); }
 function pktPub(topic, msg) { const t=strBytes(topic), m=new TextEncoder().encode(msg); return new Uint8Array([0x30, ...encLen(t.length+m.length), ...t, ...m]); }
 
@@ -84,7 +88,7 @@ async function enterChat() {
   TOPIC = 'pvo_zas_v8_' + (await sha256Hex('PVO-CH-' + GRP)).slice(0, 24);
   document.getElementById('loginScreen').style.display = 'none';
   document.getElementById('chatScreen').style.display = 'flex';
-  document.getElementById('hdrInfo').textContent = `${GRP} | ${CALL}`;
+  document.getElementById('hdrInfo').textContent = `${GRP} [#${TOPIC.slice(-4)}] | ${CALL}`;
   startWs();
 }
 function exitChat() {

@@ -3,137 +3,138 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>ЗАС-Чат ПВО | Защищённый обмен</title>
-<script src="https://jsdelivr.net"></script>
-<script src="https://jsdelivr.net"></script>
+<title>ЗАС-Чат ПВО</title>
+<script src="https://unpkg.com"></script>
+<script src="https://cloudflare.com"></script>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
   body{background:#121417;color:#e6e6e6;font-family:Consolas,monospace;height:100dvh;display:flex;flex-direction:column}
-  .top{background:#1a1d23;border-bottom:1px solid #333;padding:8px;display:flex;flex-wrap:wrap;gap:6px;align-items:center}
-  input{background:#101216;color:#00ff66;border:1px solid #444;border-radius:4px;padding:6px;font-family:inherit;font-size:13px}
-  #ch{width:105px;color:#00e5ff;font-weight:bold}
-  #cs{width:105px;color:#33aaff;font-weight:bold}
-  #dc{width:135px;color:#ffd23f;font-weight:bold}
+  #loginScreen{flex:1;display:flex;flex-direction:column;justify-content:center;align-items:center;padding:20px;gap:12px}
+  .card{background:#1a1e24;border:1px solid #333;border-radius:8px;padding:18px;width:100%;max-width:340px;display:flex;flex-direction:column;gap:10px}
+  input{background:#101216;color:#00ff66;border:1px solid #444;border-radius:4px;padding:9px;font-family:inherit;font-size:14px;width:100%}
+  button{background:#1e5631;border:1px solid #33ff66;color:#fff;border-radius:4px;padding:10px;font-family:inherit;font-size:14px;font-weight:bold;cursor:pointer}
+  #chatScreen{display:none;flex:1;flex-direction:column;height:100dvh}
+  .top{background:#1a1d23;border-bottom:1px solid #333;padding:8px 10px;display:flex;justify-content:space-between;align-items:center;font-size:12px}
   #box{flex:1;overflow-y:auto;padding:10px;display:flex;flex-direction:column;gap:8px}
   .msg{background:#1b1f26;border:1px solid #2e3440;border-radius:6px;padding:8px;max-width:92%;word-break:break-word}
   .mine{align-self:flex-end;border-color:#2b5b3c;background:#17261e}
-  .lock{border-color:#6b2626;background:#211517;color:#ff6b6b;font-size:11px}
-  .meta{font-size:11px;color:#8c96a6;margin-bottom:3px;display:flex;justify-content:space-between}
+  .meta{font-size:11px;color:#8c96a6;margin-bottom:3px;display:flex;justify-content:space-between;gap:8px}
   .fbox{margin-top:6px;padding:5px 8px;background:#13161b;border:1px dashed #33aaff;border-radius:4px;display:flex;justify-content:space-between;align-items:center}
   .fbtn{background:#1f4e78;color:#fff;padding:4px 8px;border-radius:3px;text-decoration:none;font-size:12px}
   .bot{background:#181b20;border-top:1px solid #333;padding:8px;display:flex;gap:6px}
   textarea{flex:1;background:#101216;color:#fff;border:1px solid #444;border-radius:4px;padding:7px;font-family:inherit;font-size:13px;height:38px;resize:none}
-  button{background:#1e5631;border:1px solid #33ff66;color:#fff;border-radius:4px;padding:0 14px;font-weight:bold}
 </style>
 </head>
 <body>
-<div class="top">
-  <span style="color:#00ff66;font-weight:bold">🛡 ЗАС-ЧАТ</span>
-  <span id="netSt" style="font-size:11px;color:#ffd23f">⏳ Сеть...</span>
-  <input id="ch" placeholder="Канал (ПФО-01)" onchange="reconnectChannel()">
-  <input id="cs" placeholder="Позывной" onchange="save()">
-  <input id="dc" placeholder="Код суток" oninput="onCode()">
+<div id="loginScreen">
+  <div class="card">
+    <div style="color:#00ff66;font-weight:bold;font-size:16px;text-align:center">🛡 КАНАЛ СВЯЗИ ПВО</div>
+    <input id="inGroup" placeholder="Группа (например: ПФО-01)">
+    <input id="inCall" placeholder="Позывной (например: МОГ-1)">
+    <input id="inCode" placeholder="Код суток (с экрана КП)">
+    <button onclick="enterChat()">ВОЙТИ В ЭФИР</button>
+    <div id="loginErr" style="color:#ff5555;font-size:12px;text-align:center"></div>
+  </div>
 </div>
-<div id="box"></div>
-<div class="bot">
-  <label style="background:#2b313c;border:1px solid #555;padding:7px 10px;border-radius:4px">📎<input type="file" id="fi" style="display:none"></label>
-  <textarea id="mi" placeholder="Донесение..."></textarea>
-  <button onclick="send()">➤</button>
+
+<div id="chatScreen">
+  <div class="top">
+    <span id="hdrInfo" style="color:#33aaff;font-weight:bold"></span>
+    <span id="netSt" style="color:#ffd23f">⏳ Сеть...</span>
+    <button onclick="exitChat()" style="padding:4px 8px;font-size:11px;background:#3a2020;border-color:#ff5555">Выход</button>
+  </div>
+  <div id="box"></div>
+  <div class="bot">
+    <label style="background:#2b313c;border:1px solid #555;padding:7px 10px;border-radius:4px">📎<input type="file" id="fi" style="display:none"></label>
+    <textarea id="mi" placeholder="Донесение..."></textarea>
+    <button onclick="send()" style="padding:0 14px">➤</button>
+  </div>
 </div>
+
 <script>
-let curTopic = '', raw = [], seenIds = new Set();
+let GRP="", CALL="", CODE="", TOPIC="", client=null, raw=[], seen=new Set();
 const dayStr = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; };
-const save = () => {
-  localStorage.setItem('ch', document.getElementById('ch').value.trim());
-  localStorage.setItem('cs', document.getElementById('cs').value.trim());
-  localStorage.setItem('dc', document.getElementById('dc').value.trim());
-};
-function getTopic() {
-  const ch = (document.getElementById('ch').value || 'ПФО-01').trim().toUpperCase();
-  return 'pvo_zas_net_' + CryptoJS.SHA256('PVO-CH-' + ch).toString().slice(0, 24);
+
+function enterChat() {
+  GRP = document.getElementById('inGroup').value.trim().toUpperCase();
+  CALL = document.getElementById('inCall').value.trim();
+  CODE = document.getElementById('inCode').value.trim();
+  if (!GRP || !CALL || !CODE) { document.getElementById('loginErr').textContent = "Заполните все 3 поля!"; return; }
+  TOPIC = 'pvo_zas_net_' + CryptoJS.SHA256('PVO-CH-' + GRP).toString().slice(0, 24);
+  document.getElementById('loginScreen').style.display = 'none';
+  document.getElementById('chatScreen').style.display = 'flex';
+  document.getElementById('hdrInfo').textContent = `${GRP} | ${CALL}`;
+  startMqtt();
 }
-function encObj(obj) {
-  const code = document.getElementById('dc').value.trim();
-  if (!code) return null;
-  const ct = CryptoJS.AES.encrypt(JSON.stringify(obj), dayStr() + "::" + code).toString();
-  return { id: Date.now() + "_" + Math.floor(Math.random()*999), v: 2, ct };
+
+function exitChat() {
+  if (client) { try { client.end(true); } catch(e){} }
+  raw = []; seen.clear();
+  document.getElementById('box').innerHTML = '';
+  document.getElementById('chatScreen').style.display = 'none';
+  document.getElementById('loginScreen').style.display = 'flex';
 }
-function decObj(pkg) {
-  const code = document.getElementById('dc').value.trim();
-  if (!code || !pkg.ct) return null;
-  try {
-    const str = CryptoJS.AES.decrypt(pkg.ct, dayStr() + "::" + code).toString(CryptoJS.enc.Utf8);
-    return str ? JSON.parse(str) : null;
-  } catch (e) { return null; }
+
+function startMqtt() {
+  client = mqtt.connect("wss://broker.emqx.io:8084/mqtt", { reconnectPeriod: 2000 });
+  client.on("connect", () => {
+    document.getElementById("netSt").textContent = "🟢 В СЕТИ";
+    document.getElementById("netSt").style.color = "#00ff66";
+    client.subscribe(TOPIC);
+  });
+  client.on("offline", () => {
+    document.getElementById("netSt").textContent = "🔴 ОФЛАЙН";
+    document.getElementById("netSt").style.color = "#ff5555";
+  });
+  client.on("message", (t, payload) => {
+    try {
+      const pkg = JSON.parse(payload.toString());
+      if (pkg.clear) { raw = []; seen.clear(); render(); return; }
+      if (pkg.id && !seen.has(pkg.id)) { seen.add(pkg.id); raw.push(pkg); if (raw.length > 150) raw.shift(); render(); }
+    } catch (e) {}
+  });
 }
-const client = mqtt.connect("wss://broker.emqx.io:8084/mqtt", { reconnectPeriod: 2000 });
-client.on("connect", () => {
-  document.getElementById("netSt").textContent = "🟢 В СЕТИ";
-  document.getElementById("netSt").style.color = "#00ff66";
-  curTopic = getTopic();
-  client.subscribe(curTopic);
-});
-client.on("offline", () => {
-  document.getElementById("netSt").textContent = "🔴 ОФЛАЙН";
-  document.getElementById("netSt").style.color = "#ff5555";
-});
-client.on("message", (t, payload) => {
-  try {
-    const pkg = JSON.parse(payload.toString());
-    if (pkg.clear) { raw = []; seenIds.clear(); render(); return; }
-    if (pkg.id && !seenIds.has(pkg.id)) { seenIds.add(pkg.id); raw.push(pkg); if (raw.length > 150) raw.shift(); render(); }
-  } catch (e) {}
-});
-function reconnectChannel() {
-  save();
-  if (curTopic) client.unsubscribe(curTopic);
-  curTopic = getTopic(); raw = []; seenIds.clear(); render();
-  client.subscribe(curTopic);
-}
+
 async function send() {
-  const cs = document.getElementById('cs').value.trim() || 'МОГ', tx = document.getElementById('mi').value.trim(), fi = document.getElementById('fi');
+  const tx = document.getElementById('mi').value.trim(), fi = document.getElementById('fi');
   if (!tx && !fi.files) return;
-  if (!document.getElementById('dc').value.trim()) { alert('Введите суточный код!'); return; }
-  save();
   let fd = null;
   if (fi.files) {
     const f = fi.files;
     const b64 = await new Promise(res => { const r = new FileReader(); r.onload = () => res(r.result.split(',')); r.readAsDataURL(f); });
     fd = { name: f.name, type: f.type || 'application/octet-stream', b64 };
   }
-  const pkg = encObj({ sender: cs, time: new Date().toTimeString().slice(0, 8), text: tx, file: fd });
+  const obj = { sender: CALL, time: new Date().toTimeString().slice(0, 8), text: tx, file: fd };
+  const ct = CryptoJS.AES.encrypt(JSON.stringify(obj), dayStr() + "::" + CODE).toString();
+  const pkg = { id: Date.now() + "_" + Math.floor(Math.random()*999), v: 2, ct };
   document.getElementById('mi').value = ''; fi.value = '';
-  client.publish(curTopic, JSON.stringify(pkg), { qos: 1 });
+  client.publish(TOPIC, JSON.stringify(pkg), { qos: 1 });
 }
+
 function render() {
-  const box = document.getElementById('box'), me = document.getElementById('cs').value.trim() || 'МОГ';
-  box.innerHTML = '';
+  const box = document.getElementById('box'); box.innerHTML = '';
   for (const it of raw) {
-    const dec = decObj(it), d = document.createElement('div');
-    if (dec) {
-      d.className = 'msg' + (dec.sender === me ? ' mine' : '');
-      d.innerHTML = `<div class="meta"><b style="color:#33aaff">${dec.sender}</b><span>${dec.time}</span></div>` + (dec.text ? `<div style="white-space:pre-wrap">${dec.text.replace(/</g,'&lt;')}</div>` : '');
-      if (dec.file && dec.file.b64) {
-        const fb = document.createElement('div'); fb.className = 'fbox';
-        const bin = atob(dec.file.b64), arr = new Uint8Array(bin.length);
-        for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
-        const a = document.createElement('a'); a.className = 'fbtn'; a.textContent = 'Скачать'; a.download = dec.file.name;
-        a.href = URL.createObjectURL(new Blob([arr], { type: dec.file.type }));
-        fb.innerHTML = `<span>📦 ${dec.file.name}</span>`; fb.appendChild(a); d.appendChild(fb);
-      }
-    } else {
-      d.className = 'msg lock'; d.textContent = `🔒 [ЗАШИФРОВАНО] ${(it.ct || '').slice(0, 50)}...`;
+    let dec = null;
+    try {
+      const str = CryptoJS.AES.decrypt(it.ct, dayStr() + "::" + CODE).toString(CryptoJS.enc.Utf8);
+      if (str) dec = JSON.parse(str);
+    } catch (e) {}
+    if (!dec) continue; // Сообщения с неверным кодом суток вообще не отображаются!
+    const d = document.createElement('div');
+    d.className = 'msg' + (dec.sender === CALL ? ' mine' : '');
+    d.innerHTML = `<div class="meta"><b style="color:#33aaff">${dec.sender}</b><span>${dec.time}</span></div>` + (dec.text ? `<div style="white-space:pre-wrap">${dec.text.replace(/</g,'&lt;')}</div>` : '');
+    if (dec.file && dec.file.b64) {
+      const fb = document.createElement('div'); fb.className = 'fbox';
+      const bin = atob(dec.file.b64), arr = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+      const a = document.createElement('a'); a.className = 'fbtn'; a.textContent = 'Скачать'; a.download = dec.file.name;
+      a.href = URL.createObjectURL(new Blob([arr], { type: dec.file.type }));
+      fb.innerHTML = `<span>📦 ${dec.file.name}</span>`; fb.appendChild(a); d.appendChild(fb);
     }
     box.appendChild(d);
   }
   box.scrollTop = box.scrollHeight;
 }
-function onCode() { save(); render(); }
-window.onload = () => {
-  document.getElementById('ch').value = localStorage.getItem('ch') || 'ПФО-01';
-  document.getElementById('cs').value = localStorage.getItem('cs') || 'МОГ-1';
-  document.getElementById('dc').value = localStorage.getItem('dc') || '';
-};
 </script>
 </body>
 </html>

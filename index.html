@@ -26,7 +26,7 @@
 <body>
 <div id="loginScreen">
   <div class="card">
-    <div style="color:#00ff66;font-weight:bold;font-size:16px;text-align:center">🛡 КАНАЛ СВЯЗИ ПВО (v9)</div>
+    <div style="color:#00ff66;font-weight:bold;font-size:16px;text-align:center">🛡 КАНАЛ СВЯЗИ ПВО (v10)</div>
     <input id="inGroup" placeholder="Группа (например: ПФО-01)">
     <input id="inCall" placeholder="Позывной (например: МОГ-1)">
     <input id="inCode" placeholder="Код суток (с экрана КП)">
@@ -48,8 +48,8 @@
   </div>
 </div>
 <script>
-const BROKER_URL = "wss://broker.emqx.io:8084/mqtt";
-let GRP="", CALL="", CODE="", TOPIC="", ws=null, pingT=null, rxCnt=0, raw=[], seen=new Set();
+const RELAY = "https://ntfy.sh";
+let GRP="", CALL="", CODE="", TOPIC="", pollT=null, raw=[], seen=new Set();
 const dayStr = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; };
 function normGroup(s) {
   const map = {'А':'A','В':'B','Е':'E','К':'K','М':'M','Н':'H','О':'O','Р':'P','С':'C','Т':'T','У':'Y','Х':'X'};
@@ -70,77 +70,48 @@ async function streamXor(bytes, keyStr, saltHex) {
 }
 const b2a = u => { let s=''; for(let i=0;i<u.length;i+=8192) s+=String.fromCharCode.apply(null,u.subarray(i,i+8192)); return btoa(s); };
 const a2b = s => { const b=atob(s), u=new Uint8Array(b.length); for(let i=0;i<b.length;i++) u[i]=b.charCodeAt(i); return u; };
-function encLen(n) { const r=[]; do { let d=n%128; n=Math.floor(n/128); if(n>0) d|=128; r.push(d); } while(n>0); return r; }
-function strBytes(s) { const b=new TextEncoder().encode(s); return [b.length>>8, b.length&255, ...b]; }
-function pktConnect(cid) {
-  const vh = Array.from("00044d5154540402003c".match(/../g), h => parseInt(h, 16));
-  const pl = strBytes(cid);
-  return new Uint8Array([0x10, ...encLen(vh.length + pl.length), ...vh, ...pl]);
-}
-function pktSub(topic) { const pl=[0,1, ...strBytes(topic), 0]; return new Uint8Array([0x82, ...encLen(pl.length), ...pl]); }
-function pktPub(topic, msg) { const t=strBytes(topic), m=new TextEncoder().encode(msg); return new Uint8Array([0x30, ...encLen(t.length+m.length), ...t, ...m]); }
 
 async function enterChat() {
   GRP = normGroup(document.getElementById('inGroup').value);
   CALL = document.getElementById('inCall').value.trim();
   CODE = document.getElementById('inCode').value.trim();
   if (!GRP || !CALL || !CODE) { document.getElementById('loginErr').textContent = "Заполните все 3 поля!"; return; }
-  TOPIC = 'pvo_zas_v8_' + (await sha256Hex('PVO-CH-' + GRP)).slice(0, 24);
+  TOPIC = 'pvo_zas_v10_' + (await sha256Hex('PVO-CH-' + GRP)).slice(0, 24);
   document.getElementById('loginScreen').style.display = 'none';
   document.getElementById('chatScreen').style.display = 'flex';
   document.getElementById('hdrInfo').textContent = `${GRP} [#${TOPIC.slice(-4)}] | ${CALL}`;
-  startWs();
+  pollMessages();
+  pollT = setInterval(pollMessages, 2000);
 }
 function exitChat() {
-  if (pingT) clearInterval(pingT); if (ws) { try { ws.close(); } catch(e){} ws = null; }
-  raw = []; seen.clear(); rxCnt = 0; document.getElementById('box').innerHTML = '';
+  if (pollT) clearInterval(pollT);
+  raw = []; seen.clear(); document.getElementById('box').innerHTML = '';
   document.getElementById('chatScreen').style.display = 'none';
   document.getElementById('loginScreen').style.display = 'flex';
 }
-function startWs() {
-  if (pingT) clearInterval(pingT);
-  if (ws && (ws.readyState === 0 || ws.readyState === 1)) return;
-  document.getElementById("netSt").textContent = "⏳ Подключение..."; document.getElementById("netSt").style.color = "#ffd23f";
-  ws = new WebSocket(BROKER_URL, "mqtt"); ws.binaryType = "arraybuffer";
-  ws.onopen = () => { ws.send(pktConnect("pvo_m_" + Math.random().toString(16).slice(2, 10))); };
-  ws.onmessage = async (ev) => {
-    const u = new Uint8Array(ev.data); let off = 0;
-    while (off < u.length) {
-      const hdr = u.at(off), t = hdr & 0xF0;
-      let idx = off + 1, mult = 1, rem = 0, b = 0;
-      do { b = u.at(idx++); rem += (b & 127) * mult; mult *= 128; } while ((b & 128) !== 0 && idx < u.length);
-      const pktEnd = idx + rem;
-      if (t === 0x20) {
-        document.getElementById("netSt").textContent = "🟢 В СЕТИ"; document.getElementById("netSt").style.color = "#00ff66";
-        ws.send(pktSub(TOPIC));
-        pingT = setInterval(() => { if (ws && ws.readyState === 1) ws.send(new Uint8Array([0xC0, 0x00])); }, 15000);
-      } else if (t === 0x30) {
-        const tlen = (u.at(idx) << 8) | u.at(idx + 1);
-        let bodyStart = idx + 2 + tlen;
-        if (hdr & 0x06) bodyStart += 2;
-        try {
-          const pkg = JSON.parse(new TextDecoder().decode(u.subarray(bodyStart, pktEnd)));
-          rxCnt++; document.getElementById("netSt").textContent = `🟢 В СЕТИ (${rxCnt})`;
-          if (pkg.clear) { raw = []; seen.clear(); await render(); }
-          else if (pkg.id && !seen.has(pkg.id)) { seen.add(pkg.id); raw.push(pkg); if (raw.length > 150) raw.shift(); await render(); }
-        } catch (e) {}
-      }
-      off = pktEnd;
+async function pollMessages() {
+  try {
+    const resp = await fetch(RELAY + TOPIC + "/json?poll=1&since=12h");
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    const txt = await resp.text();
+    document.getElementById("netSt").textContent = "🟢 В СЕТИ"; document.getElementById("netSt").style.color = "#00ff66";
+    let added = false;
+    for (const line of txt.split("\n")) {
+      if (!line.trim()) continue;
+      const ev = JSON.parse(line);
+      if (ev.event !== "message" || !ev.message) continue;
+      const pkg = JSON.parse(ev.message);
+      if (pkg.clear) { raw = []; seen.clear(); added = true; }
+      else if (pkg.id && !seen.has(pkg.id)) { seen.add(pkg.id); raw.push(pkg); if (raw.length > 150) raw.shift(); added = true; }
     }
-  };
-  ws.onclose = ws.onerror = () => {
-    if (document.getElementById('chatScreen').style.display === 'flex') {
-      document.getElementById("netSt").textContent = "🟡 Повтор..."; document.getElementById("netSt").style.color = "#ffd23f";
-      setTimeout(startWs, 1500);
-    }
-  };
+    if (added) await render();
+  } catch (e) {
+    document.getElementById("netSt").textContent = "🔴 Нет связи"; document.getElementById("netSt").style.color = "#ff5555";
+  }
 }
-document.addEventListener("visibilitychange", () => { if (!document.hidden && document.getElementById('chatScreen').style.display === 'flex') startWs(); });
-
 async function send() {
   const tx = document.getElementById('mi').value.trim(), fi = document.getElementById('fi');
   if (!tx && !(fi.files && fi.files.length > 0)) return;
-  if (!ws || ws.readyState !== 1) { startWs(); alert("Связь восстанавливается, повторите через 1 сек."); return; }
   let fd = null;
   if (fi.files && fi.files.length > 0) {
     const f = fi.files.item(0);
@@ -149,15 +120,15 @@ async function send() {
   }
   const salt = Math.random().toString(16).slice(2, 14);
   const encBytes = await streamXor(new TextEncoder().encode(JSON.stringify({ magic: "PVO_OK", sender: CALL, time: new Date().toTimeString().slice(0, 8), text: tx, file: fd })), dayStr() + "::" + CODE, salt);
-  const pkg = { id: Date.now() + "_" + Math.floor(Math.random()*999), v: 8, s: salt, ct: b2a(encBytes) };
+  const pkg = { id: Date.now() + "_" + Math.floor(Math.random()*999), v: 10, s: salt, ct: b2a(encBytes) };
   document.getElementById('mi').value = ''; fi.value = '';
-  ws.send(pktPub(TOPIC, JSON.stringify(pkg)));
-  if (!seen.has(pkg.id)) { seen.add(pkg.id); raw.push(pkg); await render(); }
+  await fetch(RELAY + TOPIC, { method: "POST", body: JSON.stringify(pkg) });
+  await pollMessages();
 }
 async function render() {
   const box = document.getElementById('box'); box.innerHTML = '';
   for (const it of raw) {
-    if (it.v !== 8 || !it.s || !it.ct) continue;
+    if (it.v !== 10 || !it.s || !it.ct) continue;
     let dec = null; try { const parsed = JSON.parse(new TextDecoder().decode(await streamXor(a2b(it.ct), dayStr() + "::" + CODE, it.s))); if (parsed && parsed.magic === "PVO_OK") dec = parsed; } catch (e) {}
     if (!dec) continue;
     const d = document.createElement('div'); d.className = 'msg' + (dec.sender === CALL ? ' mine' : '');

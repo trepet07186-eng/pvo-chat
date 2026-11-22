@@ -4,7 +4,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>ЗАС-Чат ПВО</title>
-<script src="https://jsdelivr.net"></script>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
   body{background:#121417;color:#e6e6e6;font-family:Consolas,monospace;height:100dvh;display:flex;flex-direction:column}
@@ -38,7 +37,7 @@
 <div id="chatScreen">
   <div class="top">
     <span id="hdrInfo" style="color:#33aaff;font-weight:bold"></span>
-    <span id="netSt" style="color:#ffd23f">⏳ Сеть...</span>
+    <span id="netSt" style="color:#ffd23f">⏳ Подключение...</span>
     <button onclick="exitChat()" style="padding:4px 8px;font-size:11px;background:#3a2020;border-color:#ff5555">Выход</button>
   </div>
   <div id="box"></div>
@@ -49,14 +48,12 @@
   </div>
 </div>
 <script>
-let GRP="", CALL="", CODE="", TOPIC="", client=null, raw=[], seen=new Set();
+let GRP="", CALL="", CODE="", TOPIC="", ws=null, pingT=null, bIdx=0, raw=[], seen=new Set();
+const BROKERS = ["wss://broker.emqx.io:8084/mqtt", "wss://://hivemq.com", "wss://test.mosquitto.org:8081/mqtt"];
 const dayStr = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; };
 async function sha256Hex(str) {
   const buf = new TextEncoder().encode(str);
-  if (window.crypto && crypto.subtle) {
-    const h = await crypto.subtle.digest('SHA-256', buf);
-    return Array.from(new Uint8Array(h)).map(b => b.toString(16).padStart(2,'0')).join('');
-  }
+  if (window.crypto && crypto.subtle) { const h = await crypto.subtle.digest('SHA-256', buf); return Array.from(new Uint8Array(h)).map(b => b.toString(16).padStart(2,'0')).join(''); }
   let h1 = 0x811c9dc5, h2 = 0x1b873593;
   for (let i = 0; i < buf.length; i++) { h1 = Math.imul(h1 ^ buf[i], 0x01000193); h2 = Math.imul(h2 ^ buf[i], 0x85ebca6b); }
   return ((h1 >>> 0).toString(16).padStart(8,'0') + (h2 >>> 0).toString(16).padStart(8,'0')).repeat(4);
@@ -71,26 +68,59 @@ async function streamXor(bytes, keyStr, saltHex) {
 }
 const b2a = u => { let s=''; for(let i=0;i<u.length;i+=8192) s+=String.fromCharCode.apply(null,u.subarray(i,i+8192)); return btoa(s); };
 const a2b = s => { const b=atob(s), u=new Uint8Array(b.length); for(let i=0;i<b.length;i++) u[i]=b.charCodeAt(i); return u; };
+function encLen(n) { const r=[]; do { let d=n%128; n=Math.floor(n/128); if(n>0) d|=128; r.push(d); } while(n>0); return r; }
+function strBytes(s) { const b=new TextEncoder().encode(s); return [b.length>>8, b.length&255, ...b]; }
+function pktConnect(cid) { const vh=, pl=strBytes(cid); return new Uint8Array([0x10, ...encLen(vh.length+pl.length), ...vh, ...pl]); }
+function pktSub(topic) { const pl=[0,1, ...strBytes(topic), 0]; return new Uint8Array([0x82, ...encLen(pl.length), ...pl]); }
+function pktPub(topic, msg) { const t=strBytes(topic), m=new TextEncoder().encode(msg); return new Uint8Array([0x30, ...encLen(t.length+m.length), ...t, ...m]); }
+
 async function enterChat() {
   GRP = document.getElementById('inGroup').value.trim().toUpperCase(); CALL = document.getElementById('inCall').value.trim(); CODE = document.getElementById('inCode').value.trim();
   if (!GRP || !CALL || !CODE) { document.getElementById('loginErr').textContent = "Заполните все 3 поля!"; return; }
   TOPIC = 'pvo_zas_v3_' + (await sha256Hex('PVO-CH-' + GRP)).slice(0, 24);
   document.getElementById('loginScreen').style.display = 'none'; document.getElementById('chatScreen').style.display = 'flex';
-  document.getElementById('hdrInfo').textContent = `${GRP} | ${CALL}`; startMqtt();
+  document.getElementById('hdrInfo').textContent = `${GRP} | ${CALL}`; startWs();
 }
-function exitChat() { if (client) { try { client.end(true); } catch(e){} } raw = []; seen.clear(); document.getElementById('box').innerHTML = ''; document.getElementById('chatScreen').style.display = 'none'; document.getElementById('loginScreen').style.display = 'flex'; }
-function startMqtt() {
-  if (typeof mqtt === 'undefined') { document.getElementById("netSt").textContent = "🔴 Ошибка сети"; return; }
-  client = mqtt.connect("wss://broker.emqx.io:8084/mqtt", { reconnectPeriod: 2000 });
-  client.on("connect", () => { document.getElementById("netSt").textContent = "🟢 В СЕТИ"; document.getElementById("netSt").style.color = "#00ff66"; client.subscribe(TOPIC); });
-  client.on("offline", () => { document.getElementById("netSt").textContent = "🔴 ОФЛАЙН"; document.getElementById("netSt").style.color = "#ff5555"; });
-  client.on("message", async (t, payload) => { try { const pkg = JSON.parse(payload.toString()); if (pkg.clear) { raw = []; seen.clear(); await render(); return; } if (pkg.id && !seen.has(pkg.id)) { seen.add(pkg.id); raw.push(pkg); if (raw.length > 150) raw.shift(); await render(); } } catch (e) {} });
+function exitChat() {
+  if (pingT) clearInterval(pingT); if (ws) { try { ws.close(); } catch(e){} }
+  raw = []; seen.clear(); document.getElementById('box').innerHTML = '';
+  document.getElementById('chatScreen').style.display = 'none'; document.getElementById('loginScreen').style.display = 'flex';
+}
+function startWs() {
+  if (pingT) clearInterval(pingT);
+  const url = BROKERS[bIdx % BROKERS.length]; bIdx++;
+  document.getElementById("netSt").textContent = "⏳ Сеть (" + bIdx + ")..."; document.getElementById("netSt").style.color = "#ffd23f";
+  ws = new WebSocket(url, "mqtt"); ws.binaryType = "arraybuffer";
+  ws.onopen = () => { ws.send(pktConnect("pvo_" + Math.random().toString(16).slice(2, 10))); };
+  ws.onmessage = async (ev) => {
+    const u = new Uint8Array(ev.data); if (!u.length) return;
+    const t = u & 0xF0;
+    if (t === 0x20) {
+      document.getElementById("netSt").textContent = "🟢 В СЕТИ"; document.getElementById("netSt").style.color = "#00ff66";
+      ws.send(pktSub(TOPIC));
+      pingT = setInterval(() => { if (ws && ws.readyState === 1) ws.send(new Uint8Array([0xC0, 0x00])); }, 20000);
+    } else if (t === 0x30) {
+      let idx = 1, mult = 1, b = 0;
+      do { b = u[idx++]; mult *= 128; } while ((b & 128) !== 0);
+      const tlen = (u[idx] << 8) | u[idx + 1]; idx += 2 + tlen;
+      if (u & 0x06) idx += 2;
+      try {
+        const pkg = JSON.parse(new TextDecoder().decode(u.subarray(idx)));
+        if (pkg.clear) { raw = []; seen.clear(); await render(); return; }
+        if (pkg.id && !seen.has(pkg.id)) { seen.add(pkg.id); raw.push(pkg); if (raw.length > 150) raw.shift(); await render(); }
+      } catch (e) {}
+    }
+  };
+  ws.onclose = ws.onerror = () => { if (document.getElementById('chatScreen').style.display === 'flex') { document.getElementById("netSt").textContent = "🟡 Повтор..."; setTimeout(startWs, 2000); } };
 }
 async function send() {
-  const tx = document.getElementById('mi').value.trim(), fi = document.getElementById('fi'); if (!tx && !fi.files) return;
-  let fd = null; if (fi.files) { const f = fi.files; const b64 = await new Promise(res => { const r = new FileReader(); r.onload = () => res(r.result.split(',')); r.readAsDataURL(f); }); fd = { name: f.name, type: f.type || 'application/octet-stream', b64 }; }
+  const tx = document.getElementById('mi').value.trim(), fi = document.getElementById('fi');
+  if ((!tx && !fi.files) || !ws || ws.readyState !== 1) return;
+  let fd = null;
+  if (fi.files) { const f = fi.files; const b64 = await new Promise(res => { const r = new FileReader(); r.onload = () => res(r.result.split(',')); r.readAsDataURL(f); }); fd = { name: f.name, type: f.type || 'application/octet-stream', b64 }; }
   const salt = Math.random().toString(16).slice(2, 14), encBytes = await streamXor(new TextEncoder().encode(JSON.stringify({ magic: "PVO_OK", sender: CALL, time: new Date().toTimeString().slice(0, 8), text: tx, file: fd })), dayStr() + "::" + CODE, salt);
-  document.getElementById('mi').value = ''; fi.value = ''; client.publish(TOPIC, JSON.stringify({ id: Date.now() + "_" + Math.floor(Math.random()*999), v: 3, s: salt, ct: b2a(encBytes) }), { qos: 1 });
+  document.getElementById('mi').value = ''; fi.value = '';
+  ws.send(pktPub(TOPIC, JSON.stringify({ id: Date.now() + "_" + Math.floor(Math.random()*999), v: 3, s: salt, ct: b2a(encBytes) })));
 }
 async function render() {
   const box = document.getElementById('box'); box.innerHTML = '';
